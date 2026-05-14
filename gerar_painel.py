@@ -1,0 +1,477 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+gerar_painel.py — Painel FUNPEN / CGU
+Usa D3.js + GeoJSON hospedado no GitHub (raw.githubusercontent.com).
+Requer conexão com internet para carregar o mapa.
+"""
+import json, os, sys
+from pathlib import Path
+
+PLANILHA_PATH = "Base_consolidação_nacional_Funpen.xlsx"
+HTML_OUTPUT   = "index.html"
+GEOJSON_URL   = "https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/brazil-states.geojson"
+
+LINKS_RELATORIO = {
+    "Acre":"","Alagoas":"","Amapá":"","Amazonas":"","Bahia":"","Ceará":"",
+    "Distrito Federal":   "https://www.cgu.gov.br/relatorios",
+    "Espírito Santo":"","Goiás":"","Maranhão":"","Mato Grosso":"",
+    "Mato Grosso do Sul": "https://www.cgu.gov.br/relatorios",
+    "Minas Gerais":"",
+    "Pará":               "https://www.cgu.gov.br/relatorios",
+    "Paraíba":"","Paraná":"","Pernambuco":"","Piauí":"","Rio de Janeiro":"",
+    "Rio Grande do Norte":"","Rio Grande do Sul":"","Rondônia":"","Roraima":"",
+    "Santa Catarina":     "https://www.cgu.gov.br/relatorios",
+    "São Paulo":          "https://www.cgu.gov.br/relatorios",
+    "Sergipe":            "https://www.cgu.gov.br/relatorios",
+    "Tocantins":"",
+}
+URL_PADRAO = "https://www.cgu.gov.br/assuntos/auditoria-e-fiscalizacao/avaliacao-da-gestao-dos-administradores/transferencias-voluntarias"
+
+# Mapa nome GeoJSON (inglês/pt) -> nome planilha
+NOME_MAP = {
+    "Acre":"Acre","Alagoas":"Alagoas","Amapá":"Amapá","Amazonas":"Amazonas",
+    "Bahia":"Bahia","Ceará":"Ceará","Distrito Federal":"Distrito Federal",
+    "Espírito Santo":"Espírito Santo","Goiás":"Goiás","Maranhão":"Maranhão",
+    "Mato Grosso":"Mato Grosso","Mato Grosso do Sul":"Mato Grosso do Sul",
+    "Minas Gerais":"Minas Gerais","Pará":"Pará","Paraíba":"Paraíba",
+    "Paraná":"Paraná","Pernambuco":"Pernambuco","Piauí":"Piauí",
+    "Rio de Janeiro":"Rio de Janeiro","Rio Grande do Norte":"Rio Grande do Norte",
+    "Rio Grande do Sul":"Rio Grande do Sul","Rondônia":"Rondônia",
+    "Roraima":"Roraima","Santa Catarina":"Santa Catarina","São Paulo":"São Paulo",
+    "Sergipe":"Sergipe","Tocantins":"Tocantins",
+}
+
+SIG_MAP = {
+    "Acre":"AC","Alagoas":"AL","Amapá":"AP","Amazonas":"AM","Bahia":"BA",
+    "Ceará":"CE","Distrito Federal":"DF","Espírito Santo":"ES","Goiás":"GO",
+    "Maranhão":"MA","Mato Grosso":"MT","Mato Grosso do Sul":"MS",
+    "Minas Gerais":"MG","Pará":"PA","Paraíba":"PB","Paraná":"PR",
+    "Pernambuco":"PE","Piauí":"PI","Rio de Janeiro":"RJ",
+    "Rio Grande do Norte":"RN","Rio Grande do Sul":"RS","Rondônia":"RO",
+    "Roraima":"RR","Santa Catarina":"SC","São Paulo":"SP",
+    "Sergipe":"SE","Tocantins":"TO",
+}
+
+def ler_planilha(caminho):
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        print("ERRO: execute  pip install openpyxl"); sys.exit(1)
+    if not Path(caminho).exists():
+        print(f"ERRO: {caminho} não encontrado"); sys.exit(1)
+    wb = load_workbook(caminho, read_only=True)
+    ws = wb.active
+    dados = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        uf = row[0]
+        if not uf: continue
+        transf = [float(row[i]) if row[i] is not None else 0.0 for i in [1,3,5,7,9]]
+        exec_  = [float(row[i]) if row[i] is not None else 0.0 for i in [2,4,6,8,10]]
+        if not (any(v>0 for v in transf) or any(v>0 for v in exec_)): continue
+        def campo(i): v=row[i]; return str(v).strip() if v is not None and str(v).strip() else None
+        def num(i):
+            v=row[i]
+            if v is None: return 0.0
+            try: return float(v)
+            except: return 0.0
+        impacto = num(15); inconf = campo(14)
+        dados[uf] = {
+            "sig": SIG_MAP.get(uf, uf[:2].upper()),
+            "pop": int(num(11)), "cob": num(12) if row[12] is not None else None,
+            "alin": campo(13), "inconformidades": inconf,
+            "impacto": impacto, "impCorr": (impacto==0.0 and bool(inconf)),
+            "gov": campo(16), "causaExec": campo(17),
+            "causaDesalin": campo(18), "causaInconf": campo(19),
+            "link": (str(row[20]).strip() if len(row)>20 and row[20] else None) or LINKS_RELATORIO.get(uf,"") or URL_PADRAO,
+            "transf": transf, "exec": exec_,
+        }
+    wb.close()
+    print(f"  Planilha: {len(dados)} UFs com dados")
+    return dados
+
+def gerar_html(dados):
+    dados_js  = json.dumps(dados,    ensure_ascii=False, separators=(",",":"))
+    nomemap_js= json.dumps(NOME_MAP, ensure_ascii=False, separators=(",",":"))
+    sigmap_js = json.dumps(SIG_MAP,  ensure_ascii=False, separators=(",",":"))
+
+    return """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FUNPEN — Painel de Consolidação Nacional · CGU</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f3;color:#1a1a18;font-size:14px}
+#app{max-width:1280px;margin:0 auto;padding:1.25rem 1.5rem}
+.hdr{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:1.25rem;flex-wrap:wrap;gap:8px}
+.hdr h1{font-size:22px;font-weight:500}.hdr p{font-size:11px;color:#73726c;margin-top:3px}
+.badge{background:#1B4F8C;color:#fff;font-size:10px;padding:3px 10px;border-radius:4px;font-weight:500;white-space:nowrap;margin-top:4px}
+.mets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:1.25rem}
+.met{background:#ebebea;border-radius:8px;padding:12px 14px}
+.met .lbl{font-size:10px;color:#73726c;margin-bottom:4px}
+.met .val{font-size:22px;font-weight:500;line-height:1.2}
+.met .sub{font-size:10px;color:#73726c;margin-top:2px}
+.main{display:grid;grid-template-columns:1fr 330px;gap:14px}
+.map-area{display:flex;flex-direction:column;gap:10px}
+.map-lbl{font-size:11px;color:#73726c}
+#map-wrap{background:#fff;border:.5px solid #d3d1c7;border-radius:12px;padding:8px;position:relative}
+#map-svg{width:100%;display:block}
+.tooltip{position:fixed;pointer-events:none;background:#fff;border:.5px solid #ccc;border-radius:8px;padding:9px 12px;font-size:11px;line-height:1.6;z-index:100;display:none;max-width:220px;box-shadow:0 2px 12px rgba(0,0,0,.1)}
+.tooltip strong{font-size:12px;font-weight:500}
+.legend{display:flex;gap:12px;flex-wrap:wrap;align-items:center;padding:0 4px}
+.li{display:flex;align-items:center;gap:5px;font-size:10px;color:#73726c}
+.lsq{width:12px;height:12px;border-radius:2px;flex-shrink:0}
+.wc-wrap{background:#fff;border:.5px solid #d3d1c7;border-radius:12px;padding:14px}
+.wc-title{font-size:10px;font-weight:500;color:#73726c;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
+#wc-canvas{width:100%;border-radius:6px;background:#f5f5f3;display:block}
+.sidebar{display:flex;flex-direction:column;gap:10px}
+.card{background:#fff;border:.5px solid #d3d1c7;border-radius:12px;padding:14px}
+.card-title{font-size:10px;font-weight:500;color:#73726c;text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px}
+.empty-state{text-align:center;padding:24px 12px;color:#73726c;font-size:12px;line-height:1.6}
+.uf-hdr{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.uf-sig-box{width:40px;height:40px;border-radius:8px;background:#1B4F8C;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:500;font-size:14px;flex-shrink:0}
+.uf-nome{font-size:14px;font-weight:500}.uf-status{font-size:10px;color:#1D9E75;margin-top:1px}
+.irow{display:flex;justify-content:space-between;align-items:flex-start;padding:4px 0;border-bottom:.5px solid #ebebea;font-size:11px;gap:8px}
+.irow:last-child{border-bottom:none}
+.ilbl{color:#73726c;flex-shrink:0}.ival{text-align:right;font-weight:500}
+.tag{display:inline-block;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:500}
+.t-sim{background:#EAF3DE;color:#27500A}.t-parc{background:#FAEEDA;color:#633806}.t-nao{background:#FCEBEB;color:#791F1F}
+.ach{padding:5px 8px;border-radius:5px;font-size:11px;line-height:1.45;margin-bottom:5px}
+.ach-warn{background:#FAEEDA;color:#633806;border-left:3px solid #BA7517}
+.ach-ok{background:#EAF3DE;color:#27500A;border-left:3px solid #1D9E75}
+.imp-box{border-radius:6px;padding:7px 10px;font-size:11px;font-weight:500;text-align:center;margin:6px 0}
+.imp-pend{background:#FCEBEB;color:#791F1F}.imp-corr{background:#EAF3DE;color:#27500A}.imp-zero{background:#ebebea;color:#73726c}
+.tabs{display:flex;gap:5px;margin-bottom:10px}
+.tab-btn{padding:3px 12px;border-radius:5px;font-size:11px;border:.5px solid #d3d1c7;background:transparent;cursor:pointer;color:#73726c;font-family:inherit}
+.tab-btn.on{background:#1B4F8C;color:#fff;border-color:#1B4F8C}
+.tab-sec{display:none}.tab-sec.on{display:block}
+.btn-rel{display:block;width:100%;padding:8px;background:#1B4F8C;color:#fff;text-align:center;border-radius:8px;font-size:12px;font-weight:500;text-decoration:none;margin-top:10px}
+.btn-rel:hover{background:#185FA5}
+.hint{font-size:10px;color:#73726c;text-align:center;margin-top:5px}
+#loading{display:flex;align-items:center;gap:8px;padding:40px;justify-content:center;color:#73726c;font-size:13px}
+.spinner{width:20px;height:20px;border:2px solid #d3d1c7;border-top-color:#1B4F8C;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:900px){.main{grid-template-columns:1fr}.mets{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div id="tooltip" class="tooltip"></div>
+<div id="app">
+<div class="hdr">
+  <div><h1>Painel de consolidação nacional — FUNPEN</h1>
+  <p>Avaliação da execução de recursos fundo a fundo · CGU / Senappen · Exercícios 2019–2023</p></div>
+  <span class="badge">CGU</span>
+</div>
+<div class="mets">
+  <div class="met"><div class="lbl">Relatórios recebidos</div><div class="val" id="m-rel">—</div><div class="sub">de 27 unidades</div></div>
+  <div class="met"><div class="lbl">Impacto financeiro de inconformidades</div><div class="val" id="m-imp">—</div><div class="sub">pendente de correção</div></div>
+  <div class="met"><div class="lbl">Pop. carcerária coberta</div><div class="val" id="m-pop">—</div><div class="sub">nas UFs avaliadas</div></div>
+  <div class="met"><div class="lbl">Execução média</div><div class="val" id="m-exec">—</div><div class="sub">do total transferido</div></div>
+</div>
+<div class="main">
+  <div class="map-area">
+    <div class="map-lbl">Preenchimento = % executado sobre total transferido 2019–2023 · 👤 pop. carcerária · ⚠ impacto pendente</div>
+    <div id="map-wrap">
+      <div id="loading"><div class="spinner"></div> Carregando mapa…</div>
+      <svg id="map-svg" viewBox="0 0 800 700" style="display:none;overflow:hidden"></svg>
+    </div>
+    <div class="legend">
+      <div class="li"><div class="lsq" style="background:#378ADD;border:.5px solid #B5D4F4"></div> Recursos executados</div>
+      <div class="li"><div class="lsq" style="background:#E6F1FB;border:.5px solid #B5D4F4"></div> Não executado</div>
+      <div class="li"><div class="lsq" style="background:#d3d1c7"></div> Sem relatório</div>
+      <div class="li">⚠ Inconformidade pendente &nbsp; 👤 Pop. carcerária</div>
+    </div>
+    <div class="wc-wrap">
+      <div class="wc-title">Causas mais frequentes — consolidado das UFs avaliadas</div>
+      <canvas id="wc-canvas" height="150"></canvas>
+    </div>
+  </div>
+  <div class="sidebar">
+    <div class="card">
+      <div id="uf-empty" class="empty-state">Selecione uma unidade federativa no mapa para visualizar os achados detalhados</div>
+      <div id="uf-detail" style="display:none">
+        <div class="uf-hdr">
+          <div class="uf-sig-box" id="d-sig"></div>
+          <div><div class="uf-nome" id="d-nome"></div><div class="uf-status">✓ Relatório recebido</div></div>
+        </div>
+        <div class="tabs">
+          <button class="tab-btn on" onclick="showTab('res',this)">Resumo</button>
+          <button class="tab-btn" onclick="showTab('fin',this)">Financeiro</button>
+          <button class="tab-btn" onclick="showTab('cau',this)">Causas</button>
+        </div>
+        <div id="tab-res" class="tab-sec on"></div>
+        <div id="tab-fin" class="tab-sec"></div>
+        <div id="tab-cau" class="tab-sec"></div>
+        <a id="d-link" href="#" target="_blank" class="btn-rel">Acessar relatório na CGU ↗</a>
+        <div class="hint">Portal de relatórios da CGU</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Transferido × Executado — R$ milhões</div>
+      <div style="position:relative;height:170px">
+        <canvas id="chart-fin" role="img" aria-label="Transferido vs executado por ano"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const DADOS   = """ + dados_js + """;
+const NOMEMAP = """ + nomemap_js + """;
+const SIGMAP  = """ + sigmap_js + """;
+const GEOJSON_URL = '""" + GEOJSON_URL + """';
+
+function fmt(v){return'R$\u00a0'+(v/1e6).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})+'\u00a0M'}
+function fmtPct(v){return Math.round(v*100)+'%'}
+function fmtPop(v){return v>=1000?(v/1000).toFixed(0)+'k':String(v)}
+function corPct(p){return p<=0.20?'#E24B4A':p<=0.50?'#EF9F27':'#1D9E75'}
+function pctExec(d){const t=d.transf.reduce((a,b)=>a+b,0),e=d.exec.reduce((a,b)=>a+b,0);return t>0?Math.min(e/t,1):0}
+
+function atualizaMetricas(){
+  const v=Object.values(DADOS);
+  const imp=v.reduce((s,d)=>s+(d.impacto>0&&!d.impCorr?d.impacto:0),0);
+  const pop=v.reduce((s,d)=>s+(d.pop||0),0);
+  let soma=0,n=0;
+  v.forEach(d=>{const t=d.transf.reduce((a,b)=>a+b,0),e=d.exec.reduce((a,b)=>a+b,0);if(t>0){soma+=e/t;n++;}});
+  const med=n>0?soma/n:0;
+  document.getElementById('m-rel').textContent=v.length;
+  document.getElementById('m-imp').textContent=imp>0?fmt(imp):'R$\u00a00';
+  document.getElementById('m-pop').textContent=pop.toLocaleString('pt-BR');
+  document.getElementById('m-exec').textContent=fmtPct(med);
+  document.getElementById('m-exec').style.color=corPct(med);
+}
+
+function showTab(id,btn){
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('on'));
+  document.querySelectorAll('.tab-sec').forEach(s=>s.classList.remove('on'));
+  btn.classList.add('on');document.getElementById('tab-'+id).classList.add('on');
+}
+
+let chartFin=null;
+function renderUF(nome,d){
+  document.getElementById('uf-empty').style.display='none';
+  document.getElementById('uf-detail').style.display='block';
+  document.getElementById('d-sig').textContent=d.sig||nome.substring(0,2).toUpperCase();
+  document.getElementById('d-nome').textContent=nome;
+  document.getElementById('d-link').href=d.link||'#';
+  const aMap={'Sim':'t-sim','Parcialmente':'t-parc','Não':'t-nao','sim':'t-sim','parcialmente':'t-parc','não':'t-nao'};
+  const totT=d.transf.reduce((a,b)=>a+b,0),totE=d.exec.reduce((a,b)=>a+b,0),pct=totT>0?totE/totT:0;
+  document.getElementById('tab-res').innerHTML=`
+    <div class="irow"><span class="ilbl">Alinhamento entre processos e planejamento</span><span class="ival"><span class="tag ${aMap[d.alin]||'t-parc'}">${d.alin||'—'}</span></span></div>
+    <div class="irow"><span class="ilbl">Cobertura CGU</span><span class="ival">${d.cob!=null?fmtPct(d.cob):'—'}</span></div>
+    <div class="irow"><span class="ilbl">Total transferido</span><span class="ival">${fmt(totT)}</span></div>
+    <div class="irow"><span class="ilbl">Total executado</span><span class="ival">${fmt(totE)}</span></div>
+    <div class="irow"><span class="ilbl">% executado</span><span class="ival" style="color:${corPct(pct)};font-size:13px">${fmtPct(pct)}</span></div>
+    <div class="irow"><span class="ilbl">Pop. carcerária</span><span class="ival">${d.pop.toLocaleString('pt-BR')} pessoas</span></div>
+    <div style="margin-top:10px">${d.inconformidades
+      ?`<div class="card-title" style="font-size:10px;margin-bottom:4px">Inconformidades</div><div class="ach ach-warn">${d.inconformidades}</div>`
+      :`<div class="ach ach-ok">Sem inconformidades com impacto financeiro</div>`}</div>
+    ${d.gov?`<div style="margin-top:8px"><div class="card-title" style="font-size:10px;margin-bottom:3px">Governança e controles</div><div style="font-size:11px;line-height:1.55">${d.gov}</div></div>`:''}`;
+  document.getElementById('tab-fin').innerHTML=`
+    ${d.impacto>0
+      ?`<div class="imp-box ${d.impCorr?'imp-corr':'imp-pend'}">${d.impCorr?'✓ Impacto corrigido — excluído do consolidado':'⚠ Impacto financeiro pendente de correção'}</div>
+        <div class="irow" style="margin-top:6px"><span class="ilbl">Valor do impacto</span><span class="ival">${fmt(d.impacto)}</span></div>
+        ${!d.impCorr?'<div style="font-size:10px;color:#791F1F;text-align:center;margin-top:5px">Corrija a inconformidade para retirar do consolidado</div>':''}`
+      :`<div class="imp-box imp-zero">Sem impacto financeiro identificado</div>`}`;
+  const ca=[];
+  if(d.causaExec)ca.push({t:'Baixa execução de recursos',v:d.causaExec});
+  if(d.causaDesalin)ca.push({t:'Desalinhamento dos planos',v:d.causaDesalin});
+  if(d.causaInconf)ca.push({t:'Inconformidades',v:d.causaInconf});
+  document.getElementById('tab-cau').innerHTML=ca.length>0
+    ?ca.map(c=>`<div style="margin-bottom:9px"><div class="card-title" style="font-size:10px;margin-bottom:3px">${c.t}</div><div style="font-size:11px;line-height:1.55;background:#f5f5f3;padding:6px 8px;border-radius:5px">${c.v}</div></div>`).join('')
+    :'<div style="padding:12px;text-align:center;color:#73726c;font-size:11px">Sem causas registradas</div>';
+  document.querySelectorAll('.tab-btn')[0].click();
+  if(chartFin)chartFin.destroy();
+  chartFin=new Chart(document.getElementById('chart-fin'),{
+    type:'bar',
+    data:{labels:['2019','2020','2021','2022','2023'],datasets:[
+      {label:'Transferido',data:d.transf.map(v=>+(v/1e6).toFixed(2)),backgroundColor:'#B5D4F4'},
+      {label:'Executado',  data:d.exec.map(v=>+(v/1e6).toFixed(2)),  backgroundColor:'#1B4F8C'}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{x:{ticks:{font:{size:10}}},y:{ticks:{font:{size:10},callback:v=>v+'M'}}}}
+  });
+}
+
+async function renderMapa(){
+  const svg  = d3.select('#map-svg');
+  const defs = svg.append('defs');
+  const tip  = document.getElementById('tooltip');
+  const W=800, H=700;
+  const popMax = Math.max(...Object.values(DADOS).map(d=>d.pop||0),1);
+
+  let geo;
+  try {
+    geo = await d3.json(GEOJSON_URL);
+  } catch(e) {
+    document.getElementById('loading').innerHTML =
+      '<span style="color:#E24B4A">Erro ao carregar mapa. Verifique a conexão com internet.</span>';
+    return;
+  }
+
+  document.getElementById('loading').style.display='none';
+  document.getElementById('map-svg').style.display='block';
+
+  const proj = d3.geoMercator().fitSize([W, H], geo);
+  const path = d3.geoPath().projection(proj);
+
+  // ClipPath de segurança para o viewBox
+  defs.append('clipPath').attr('id','mapClip')
+    .append('rect').attr('x',0).attr('y',0).attr('width',W).attr('height',H);
+  const root = svg.append('g').attr('clip-path','url(#mapClip)');
+
+  geo.features.forEach((feature, i) => {
+    const nomeGeo = feature.properties.name;
+    const nome    = NOMEMAP[nomeGeo] || nomeGeo;
+    const sig     = SIGMAP[nome] || nome.substring(0,2).toUpperCase();
+    const d       = DADOS[nome];
+    const uid     = 'clip'+i;
+    const bounds  = path.bounds(feature);
+    const bx=bounds[0][0], by=bounds[0][1];
+    const bw=bounds[1][0]-bx, bh=bounds[1][1]-by;
+    const centroid = path.centroid(feature);
+    const cx=centroid[0], cy=centroid[1];
+    const g = root.append('g');
+
+    if(d){
+      const pct=pctExec(d);
+      // ClipPath com shape real
+      defs.append('clipPath').attr('id',uid).append('path').attr('d',path(feature));
+      // Fundo (não executado)
+      g.append('path').attr('d',path(feature))
+        .attr('fill','#E6F1FB').attr('stroke','#B5D4F4').attr('stroke-width',0.6);
+      // Preenchimento proporcional de baixo para cima
+      g.append('rect')
+        .attr('x',bx-1).attr('y',by+bh*(1-pct))
+        .attr('width',bw+2).attr('height',bh*pct+1)
+        .attr('fill','#93C5FD').attr('clip-path',`url(#${uid})`);
+      // Borda
+      g.append('path').attr('d',path(feature))
+        .attr('fill','none').attr('stroke','#185FA5').attr('stroke-width',0.5);
+      // Sigla
+      const small=['SE','AL','RN','PB','ES','RJ','DF','AP'];
+      if(!isNaN(cx)&&!isNaN(cy))
+        g.append('text').attr('x',cx).attr('y',cy+3).attr('text-anchor','middle')
+          .attr('font-size',sig==='DF'?5:small.includes(sig)?6.5:8)
+          .attr('fill','#fff').attr('font-weight','500').attr('pointer-events','none')
+          .text(sig);
+      // Ícone população
+      if(d.pop>0&&!isNaN(cx)&&!isNaN(cy)){
+        const is=Math.max(7.5,Math.min(17.5,7.5+(d.pop/popMax)*12.5));
+        g.append('circle').attr('cx',cx).attr('cy',cy-is*1.5)
+          .attr('r',is*0.3).attr('fill','rgba(30,58,95,0.92)').attr('pointer-events','none');
+        g.append('path')
+          .attr('d',`M ${cx-is*0.4} ${cy-is*0.55} Q ${cx} ${cy-is*1.05} ${cx+is*0.4} ${cy-is*0.55}`)
+          .attr('fill','rgba(30,58,95,0.92)').attr('pointer-events','none');
+        g.append('text').attr('x',cx).attr('y',cy+Math.max(4,is*0.5))
+          .attr('text-anchor','middle').attr('font-size',Math.max(5.5,is*0.72))
+          .attr('fill','rgba(30,58,95,0.95)').attr('font-weight','500')
+          .attr('pointer-events','none').text(fmtPop(d.pop));
+      }
+      // Impacto pendente
+      if(d.impacto>0&&!d.impCorr&&!isNaN(cx))
+        g.append('text').attr('x',cx+bw*0.28).attr('y',cy-bh*0.25)
+          .attr('font-size',28).attr('fill','#E24B4A').attr('font-weight','bold').attr('pointer-events','none').text('⚠');
+    } else {
+      g.append('path').attr('d',path(feature))
+        .attr('fill','#d3d1c7').attr('stroke','#b4b2a9').attr('stroke-width',0.5);
+      const small=['SE','AL','RN','PB','ES','RJ','DF','AP'];
+      if(!isNaN(cx)&&!isNaN(cy))
+        g.append('text').attr('x',cx).attr('y',cy+3).attr('text-anchor','middle')
+          .attr('font-size',sig==='DF'?5:small.includes(sig)?6.5:8)
+          .attr('fill','#888780').attr('font-weight','500').attr('pointer-events','none')
+          .text(sig);
+    }
+
+    // Hit area interativa
+    g.append('path').attr('d',path(feature))
+      .attr('fill','transparent').attr('stroke','none').attr('cursor','pointer')
+      .on('mouseover',function(ev){
+        d3.select(this).attr('fill','rgba(0,0,0,0.07)');
+        let html=`<strong>${sig} — ${nome}</strong><br>`;
+        if(d){
+          const p=pctExec(d);
+          html+=`Execução: <strong style="color:${corPct(p)}">${fmtPct(p)}</strong><br>`;
+          html+=`Pop. carcerária: <strong>${d.pop.toLocaleString('pt-BR')}</strong><br>`;
+          if(d.impacto>0&&!d.impCorr) html+=`<span style="color:#BA7517">⚠ Impacto: ${fmt(d.impacto)}</span>`;
+        } else html+=`<span style="color:#888">Aguardando relatório</span>`;
+        tip.innerHTML=html;tip.style.display='block';
+        tip.style.left=(ev.clientX+14)+'px';tip.style.top=(ev.clientY-10)+'px';
+      })
+      .on('mousemove',ev=>{tip.style.left=(ev.clientX+14)+'px';tip.style.top=(ev.clientY-10)+'px';})
+      .on('mouseout',function(){d3.select(this).attr('fill','transparent');tip.style.display='none';})
+      .on('click',()=>{
+        if(d) renderUF(nome,d);
+        else{
+          document.getElementById('uf-empty').style.display='block';
+          document.getElementById('uf-empty').textContent=nome+' — relatório ainda não recebido';
+          document.getElementById('uf-detail').style.display='none';
+        }
+      });
+  });
+}
+
+function desenharWordCloud(){
+  const textos=[];
+  Object.values(DADOS).forEach(d=>{
+    if(d.causaExec)textos.push(d.causaExec);
+    if(d.causaDesalin)textos.push(d.causaDesalin);
+    if(d.causaInconf)textos.push(d.causaInconf);
+  });
+  if(!textos.length)return;
+  const tudo=textos.join(' ').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'');
+  const termos=[
+    {t:'restrição de pessoal',b:'restricao de pessoal'},{t:'burocracia',b:'burocracia'},
+    {t:'gestão contratual',b:'gestao contratual'},{t:'prestação de contas',b:'prestacao de contas'},
+    {t:'planejamento',b:'planejamento'},{t:'rotatividade',b:'rotatividade'},
+    {t:'senappen',b:'senappen'},{t:'fiscalização',b:'fiscalizacao'},
+    {t:'prioridades',b:'prioridades'},{t:'orçamento',b:'orcamento'},
+    {t:'licitação',b:'licitacao'},{t:'indefinição',b:'indefinicao'},
+    {t:'capacitação',b:'capacitacao'},{t:'custeio',b:'custeio'},
+    {t:'obras',b:'obras'},{t:'controle patrimonial',b:'controle patrimonial'},
+  ];
+  const freq=termos.map(i=>{const m=tudo.match(new RegExp(i.b,'gi'));return{termo:i.t,count:m?m.length:0};})
+    .filter(x=>x.count>0).sort((a,b)=>b.count-a.count);
+  if(!freq.length)return;
+  const maxC=freq[0].count,canvas=document.getElementById('wc-canvas');
+  canvas.width=canvas.offsetWidth||560;
+  const ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);
+  const cores=['#1B4F8C','#185FA5','#1D9E75','#BA7517','#A32D2D','#3C3489','#0F6E56','#633806'];
+  let x=12,y=24,lineH=0;
+  freq.forEach((item,i)=>{
+    const fs=Math.round(10+(item.count/maxC)*18);
+    ctx.font=`${item.count>=3?500:400} ${fs}px -apple-system,sans-serif`;
+    ctx.fillStyle=cores[i%cores.length];
+    const tw=ctx.measureText(item.termo).width;
+    lineH=Math.max(lineH,fs);
+    if(x+tw>canvas.width-10){x=12;y+=lineH+8;lineH=fs;}
+    if(y>canvas.height-6)return;
+    ctx.fillText(item.termo,x,y);x+=tw+16;
+  });
+}
+
+atualizaMetricas();
+renderMapa();
+desenharWordCloud();
+</script>
+</body></html>"""
+
+def main():
+    print("\n── Painel FUNPEN · CGU ── Gerador de HTML ──────────────")
+    print("\n[1/2] Lendo planilha…")
+    dados = ler_planilha(PLANILHA_PATH)
+    print("\n[2/2] Gerando HTML…")
+    html = gerar_html(dados)
+    Path(HTML_OUTPUT).write_text(html, encoding='utf-8')
+    print(f"\n✓ {HTML_OUTPUT} gerado ({os.path.getsize(HTML_OUTPUT)//1024} KB)")
+    print(f"  UFs com dados: {len(dados)}")
+    print(f"  ATENÇÃO: o mapa requer conexão com internet (GitHub CDN).\n")
+
+if __name__ == "__main__":
+    main()
