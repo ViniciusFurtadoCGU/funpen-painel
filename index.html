@@ -229,6 +229,9 @@ async function renderMapa(){
     .append('rect').attr('x',0).attr('y',0).attr('width',W).attr('height',H);
   const root = svg.append('g').attr('clip-path','url(#mapClip)');
 
+  // Array para ícones ⚠ — desenhados após todos os estados (sempre na frente)
+  const pendingWarnings = [];
+
   geo.features.forEach((feature, i) => {
     const nomeGeo = feature.properties.name;
     const nome    = NOMEMAP[nomeGeo] || nomeGeo;
@@ -277,10 +280,9 @@ async function renderMapa(){
           .attr('fill','rgba(30,58,95,0.95)').attr('font-weight','500')
           .attr('pointer-events','none').text(fmtPop(d.pop));
       }
-      // Impacto pendente
+      // Impacto pendente — guardado para desenhar por último (sempre na frente)
       if(d.impacto>0&&!d.impCorr&&!isNaN(cx))
-        g.append('text').attr('x',cx+bw*0.28).attr('y',cy-bh*0.25)
-          .attr('font-size',28).attr('fill','#E24B4A').attr('font-weight','bold').attr('pointer-events','none').text('⚠');
+        pendingWarnings.push({cx, cy, bw, bh});
     } else {
       g.append('path').attr('d',path(feature))
         .attr('fill','#d3d1c7').attr('stroke','#b4b2a9').attr('stroke-width',0.5);
@@ -317,6 +319,19 @@ async function renderMapa(){
           document.getElementById('uf-detail').style.display='none';
         }
       });
+  });
+
+  // Desenhar ⚠ por último — sempre na frente de todos os estados
+  pendingWarnings.forEach(({cx, cy, bw, bh}) => {
+    root.append('text')
+      .attr('x', cx + bw * 0.28 - 8)
+      .attr('y', cy - bh * 0.25 + 5)
+      .attr('font-size', 28)
+      .attr('fill', '#E24B4A')
+      .attr('font-weight', 'bold')
+      .attr('pointer-events', 'none')
+      .attr('style', 'filter:drop-shadow(0 1px 2px rgba(0,0,0,0.3))')
+      .text('⚠');
   });
 }
 
